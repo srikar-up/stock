@@ -7,6 +7,7 @@ Includes defensive cleaning to strip quoted replies, HTML tags, and email signat
 import os
 import re
 import time
+import datetime
 import smtplib
 import imaplib
 import email
@@ -65,6 +66,15 @@ class EmailBotService:
     Handles outbound SMTP sending and inbound IMAP inbox monitoring.
     """
 
+    IGNORE_SENDER_PATTERNS = [
+        "no-reply", "noreply", "mailer-daemon", "notifications", "newsletter",
+        "support@", "billing@", "donotreply", "security@", "google.com",
+        "tryhackme.com", "github.com", "linkedin.com", "facebookmail.com",
+        "twitter.com", "x.com", "medium.com", "discord.com", "steamcommunity.com",
+        "accounts.google.com", "googlealerts-noreply", "news@", "marketing@",
+        "promotions@", "updates@"
+    ]
+
     def __init__(self):
         self.email_address = os.environ.get("EMAIL_ADDRESS", "").strip()
         self.email_password = os.environ.get("EMAIL_PASSWORD", "").strip()
@@ -72,6 +82,12 @@ class EmailBotService:
         self.smtp_port = int(os.environ.get("SMTP_PORT", 587))
         self.imap_server = os.environ.get("IMAP_SERVER", "imap.gmail.com")
         self.imap_port = int(os.environ.get("IMAP_PORT", 993))
+        self.seen_uids = set()
+        self.initialized = False
+        self.boot_time = datetime.datetime.now(datetime.timezone.utc)
+        self.require_subject_keyword = os.environ.get("REQUIRE_SUBJECT_KEYWORD", "true").lower() in ("true", "1", "yes")
+        keywords_env = os.environ.get("ALLOWED_SUBJECT_KEYWORDS", "stock,stocks,stonks,ticker,quote,chart,price,re:,market,invest")
+        self.allowed_subject_keywords = [k.strip().lower() for k in keywords_env.split(",") if k.strip()]
 
     def is_configured(self) -> bool:
         """Returns True if email credentials are set in .env."""
@@ -161,8 +177,8 @@ class EmailBotService:
 
     def poll_inbox_and_respond(self, handler_callback: Callable[[str, str], None]):
         """
-        Connects to IMAP inbox, looks for UNSEEN emails, processes them with handler_callback,
-        and marks them as seen.
+        Connects to IMAP inbox, detects genuinely NEW incoming emails arriving after bot launch,
+        filters out automated/company/promotional senders, and dispatches queries to handler_callback.
         """
         if not self.is_configured():
             logger.warning("Email credentials not configured in .env. Cannot poll inbox.")
@@ -173,17 +189,36 @@ class EmailBotService:
             mail.login(self.email_address, self.email_password)
             mail.select("inbox")
 
-            status, messages = mail.search(None, "UNSEEN")
+            status, messages = mail.uid("search", None, "UNSEEN")
             if status != "OK" or not messages[0]:
                 mail.close()
                 mail.logout()
                 return
 
-            email_ids = messages[0].split()
-            logger.info(f"Found {len(email_ids)} new unread email(s).")
+            all_unseen_uids = messages[0].split()
 
-            for eid in email_ids:
-                res, data = mail.fetch(eid, "(RFC822)")
+            # First poll on startup: register all existing unread emails so we NEVER process old backlogs
+            if not self.initialized:
+                for uid in all_unseen_uids:
+                    self.seen_uids.add(uid)
+                self.initialized = True
+                logger.info(f"🚀 Inbox listener initialized. Ignored {len(self.seen_uids)} pre-existing unread email(s). Now listening ONLY for new emails arriving from this moment forward...")
+                mail.close()
+                mail.logout()
+                return
+
+            # Filter for genuinely new incoming emails received after bot started
+            new_uids = [uid for uid in all_unseen_uids if uid not in self.seen_uids]
+            if not new_uids:
+                mail.close()
+                mail.logout()
+                return
+
+            logger.info(f"📨 Detected {len(new_uids)} NEW incoming email(s)!")
+
+            for uid in new_uids:
+                self.seen_uids.add(uid)
+                res, data = mail.uid("fetch", uid, "(RFC822)")
                 if res != "OK":
                     continue
 
@@ -195,15 +230,43 @@ class EmailBotService:
                         from_header = msg.get("From", "")
                         from_email = email.utils.parseaddr(from_header)[1]
 
-                        # Ignore self-sent emails (prevent infinite loop)
+                        # 1. Ignore self-sent emails (prevent infinite loop)
                         if from_email.lower() == self.email_address.lower():
                             logger.info("Skipping email sent from self.")
                             continue
+
+                        # 2. Ignore automated / company / newsletter / no-reply senders
+                        from_lower = from_email.lower()
+                        from_hdr_lower = from_header.lower()
+                        if any(pattern in from_lower or pattern in from_hdr_lower for pattern in self.IGNORE_SENDER_PATTERNS):
+                            logger.info(f"⏭️ Skipping automated/company email from {from_email} ({from_header})")
+                            continue
+
+                        # 3. Check email date (must be from bot start time forward)
+                        date_header = msg.get("Date")
+                        if date_header:
+                            try:
+                                email_date = email.utils.parsedate_to_datetime(date_header)
+                                if email_date.tzinfo is None:
+                                    email_date = email_date.replace(tzinfo=datetime.timezone.utc)
+                                if email_date < self.boot_time - datetime.timedelta(seconds=60):
+                                    logger.info(f"⏭️ Skipping older email dated {email_date} (received before bot start time {self.boot_time})")
+                                    continue
+                            except Exception:
+                                pass
 
                         # Extract subject
                         subject, encoding = decode_header(msg.get("Subject", ""))[0]
                         if isinstance(subject, bytes):
                             subject = subject.decode(encoding or "utf-8", errors="ignore")
+
+                        # 4. Filter by subject keywords (e.g., 'stock', 'stocks', 'ticker', 'quote', 'chart', 'price', 're:')
+                        # Ensures personal, company, or unrelated emails are completely ignored!
+                        subject_lower = (subject or "").lower()
+                        if self.require_subject_keyword:
+                            if not any(kw in subject_lower for kw in self.allowed_subject_keywords):
+                                logger.info(f"⏭️ Skipping email from {from_email}: Subject '{subject}' does not contain stock keywords ({', '.join(self.allowed_subject_keywords)})")
+                                continue
 
                         # Extract body text (prefer text/plain, fallback to text/html)
                         plain_body = ""
@@ -234,6 +297,11 @@ class EmailBotService:
                         cleaned_subject = clean_email_text(subject)
 
                         full_query = f"{cleaned_subject} {cleaned_body}".strip()
+
+                        # Skip completely empty messages
+                        if not full_query:
+                            logger.info(f"Skipping empty email from {from_email}.")
+                            continue
 
                         logger.info(f"📧 Processing cleaned email from {from_email}: '{full_query}'")
                         handler_callback(from_email, full_query)
