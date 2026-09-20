@@ -95,6 +95,7 @@ class FirestoreContextManager:
         self,
         user_email: str,
         last_ticker: Optional[str] = None,
+        last_tickers: Optional[Any] = None,
         last_action: Optional[str] = None
     ) -> Dict[str, Any]:
         """
@@ -108,6 +109,8 @@ class FirestoreContextManager:
         }
         if last_ticker:
             update_payload["last_ticker"] = last_ticker
+        if last_tickers:
+            update_payload["last_tickers"] = last_tickers
         if last_action:
             update_payload["last_action"] = last_action
 

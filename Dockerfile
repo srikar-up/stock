@@ -5,26 +5,32 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=7860
 
-WORKDIR /app
-
-# Install system utilities if needed for C++ builds / fonts
+# Install minimal OS dependencies for C++ compilation and fonts
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependencies and install
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Set up non-root user (UID 1000 standard for Hugging Face Spaces)
+RUN useradd -m -u 1000 user
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH
 
-# Attempt to install cactus-needle if wheels are compatible with linux-x86_64
-RUN pip install --no-cache-dir cactus-needle || true
+WORKDIR $HOME/app
 
-# Copy project files
-COPY . .
+# Install Python requirements
+COPY --chown=user requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir --user cactus-needle || true
+
+# Copy application files
+COPY --chown=user . $HOME/app
+
+# Switch to non-root user
+USER user
 
 # Expose standard Hugging Face Spaces port
 EXPOSE 7860
 
-# Run uvicorn server
+# Launch FastAPI web application and background listener
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]

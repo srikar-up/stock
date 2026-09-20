@@ -12,6 +12,7 @@ Features:
 - Automated Inbound IMAP Email Listener & SMTP Auto-Responder
 """
 import os
+import re
 import io
 import time
 import urllib.parse
@@ -53,103 +54,167 @@ class StockEmailBot:
         self.email_service = EmailBotService()
         self.bot_email = os.environ.get("EMAIL_ADDRESS", "stonks.gro@gmail.com").strip()
 
-    def process_request(self, from_email: str, user_message: str):
+    def process_request(
+        self,
+        from_email: str,
+        user_message: str,
+        subject: str = "",
+        message_id: str = "",
+        references: str = ""
+    ):
         """
         Processes an incoming query via Needle 3 and dispatches the response email.
         """
-        logger.info(f"📧 Processing query from {from_email}: '{user_message}'")
-
-        # Process through Needle 3 agent
-        result = self.agent.process_message(
-            user_email=from_email,
-            subject="",
-            body=user_message
-        )
-
-        intent = result.get("intent", "CHAT")
-        attachments = []
-
-        # ---------------------------------------------------------------------
-        # 1. Prepare Attachments (Charts or CSVs)
-        # ---------------------------------------------------------------------
-        if intent == "CHART":
-            ticker = result.get("ticker", "AAPL")
-            period = result.get("period", "1mo")
-            chart_bytes = self.market.generate_trend_chart(ticker, period=period)
-            if chart_bytes:
-                attachments.append({
-                    "type": "image",
-                    "data": chart_bytes,
-                    "filename": f"{ticker}_chart_{period}.png"
-                })
-
-        elif intent == "CSV":
-            ticker = result.get("ticker", "AAPL")
-            period = result.get("period", "1mo")
-            rows = result.get("rows", [])
-            if rows:
-                df = pd.DataFrame(rows)
-                csv_bytes = df.to_csv(index=False).encode("utf-8")
-                attachments.append({
-                    "type": "csv",
-                    "data": csv_bytes,
-                    "filename": f"{ticker}_historical_{period}.csv"
-                })
-
-        elif intent == "COMPARE":
-            tickers = result.get("tickers", ["AAPL", "MSFT"])
-            if len(tickers) >= 2:
-                chart_bytes = self.market.generate_trend_chart(tickers[0], period="1mo")
-                if chart_bytes:
-                    attachments.append({
-                        "type": "image",
-                        "data": chart_bytes,
-                        "filename": f"{tickers[0]}_trend.png"
-                    })
-
-        # ---------------------------------------------------------------------
-        # 2. Build Interactive Email Body with Action Buttons
-        # ---------------------------------------------------------------------
-        email_body = self._build_email_body(result, from_email)
-
-        # ---------------------------------------------------------------------
-        # 3. Deliver via SMTP
-        # ---------------------------------------------------------------------
-        if self.email_service.is_configured():
-            subject = f"Re: Stock Update ({result.get('ticker', 'Assistant')}) 📈"
-            self.email_service.send_email(
-                to_email=from_email,
+        logger.info(f"📧 Processing query from {from_email}: '{user_message}' (Subject: '{subject}')")
+        try:
+            # Process through Needle 3 agent with full query & subject context
+            result = self.agent.process_message(
+                user_email=from_email,
                 subject=subject,
-                message=email_body,
-                attachments=attachments
+                body=user_message
             )
-            logger.info(f"✅ Response email successfully dispatched to {from_email}")
-        else:
-            logger.info(f"ℹ️ Email credentials not configured in .env. Outputting response locally:\n{email_body}")
 
-    def _create_mailto_button(self, label: str, subject: str, body: str, bg_color: str = "#2563eb", text_color: str = "#ffffff") -> str:
-        """Generates a pre-filled, one-click interactive mailto button for email clients."""
-        encoded_subj = urllib.parse.quote(subject)
-        encoded_body = urllib.parse.quote(body)
-        mailto_url = f"mailto:{self.bot_email}?subject={encoded_subj}&body={encoded_body}"
+            intent = result.get("intent", "CHAT")
+            attachments = []
+
+            # ---------------------------------------------------------------------
+            # 1. Prepare Attachments (Charts or CSVs)
+            # ---------------------------------------------------------------------
+            msg_lower = user_message.lower()
+            is_unknown_or_chat = intent in ("NOT_FOUND", "CHAT")
+            wants_chart = not is_unknown_or_chat and ((intent == "CHART") or any(w in msg_lower for w in ["chart", "graph", "plot", "trend", "visual"]))
+            wants_csv = not is_unknown_or_chat and ((intent in ("CSV", "COMPARATIVE_CSV")) or any(
+                w in msg_lower for w in ["csv", "sheet", "sheets", "spreadsheet", "spreadsheets", "excel", "raw data", "tabular", "data sheet", "datasheet", "table", "historical data"]
+            ))
+
+            if intent == "COMPARE":
+                tickers = result.get("tickers", ["AAPL", "MSFT"])
+                period = result.get("period", "1mo")
+                if len(tickers) >= 2:
+                    chart_bytes = self.market.generate_comparison_chart(tickers, period=period)
+                    if chart_bytes:
+                        attachments.append({
+                            "type": "image",
+                            "data": chart_bytes,
+                            "filename": f"{tickers[0]}_{tickers[1]}_comparison_{period}.png"
+                        })
+                    if wants_csv:
+                        comp_df = self.market.get_comparative_csv(tickers, period=period)
+                        if comp_df is not None and not comp_df.empty:
+                            csv_bytes = comp_df.to_csv(index=False).encode("utf-8")
+                            attachments.append({
+                                "type": "csv",
+                                "data": csv_bytes,
+                                "filename": f"{tickers[0]}_{tickers[1]}_comparison_{period}.csv"
+                            })
+
+            elif intent == "COMPARATIVE_CSV":
+                tickers = result.get("tickers", ["AAPL", "MSFT"])
+                period = result.get("period", "1mo")
+                if len(tickers) >= 2:
+                    comp_df = self.market.get_comparative_csv(tickers, period=period)
+                    if comp_df is not None and not comp_df.empty:
+                        csv_bytes = comp_df.to_csv(index=False).encode("utf-8")
+                        attachments.append({
+                            "type": "csv",
+                            "data": csv_bytes,
+                            "filename": f"{tickers[0]}_{tickers[1]}_comparison_{period}.csv"
+                        })
+                    if wants_chart:
+                        chart_bytes = self.market.generate_comparison_chart(tickers, period=period)
+                        if chart_bytes:
+                            attachments.append({
+                                "type": "image",
+                                "data": chart_bytes,
+                                "filename": f"{tickers[0]}_{tickers[1]}_comparison_{period}.png"
+                            })
+            elif not is_unknown_or_chat:
+                ticker = result.get("ticker", "AAPL")
+                period = result.get("period", "1mo")
+
+                if wants_chart:
+                    chart_bytes = self.market.generate_trend_chart(ticker, period=period)
+                    if chart_bytes:
+                        attachments.append({
+                            "type": "image",
+                            "data": chart_bytes,
+                            "filename": f"{ticker}_chart_{period}.png"
+                        })
+
+                if wants_csv:
+                    rows = result.get("rows") or self.market.get_historical_table(ticker, period=period)
+                    if rows:
+                        df = pd.DataFrame(rows)
+                        csv_bytes = df.to_csv(index=False).encode("utf-8")
+                        attachments.append({
+                            "type": "csv",
+                            "data": csv_bytes,
+                            "filename": f"{ticker}_historical_{period}.csv"
+                        })
+
+            # ---------------------------------------------------------------------
+            # 2. Determine Thread Reply Subject (Prevent 'Re: Re: Re:' stacking)
+            # ---------------------------------------------------------------------
+            if subject and subject.strip():
+                clean_subj = subject.strip()
+                base_subj = re.sub(r"^(?:re:\s*|fwd:\s*)+", "", clean_subj, flags=re.IGNORECASE).strip()
+                reply_subject = f"Re: {base_subj}"
+            else:
+                reply_subject = f"Re: Stock Update ({result.get('ticker', 'Assistant')}) 📈"
+
+            # ---------------------------------------------------------------------
+            # 3. Build Interactive Email Body with Thread-Safe Suggestions
+            # ---------------------------------------------------------------------
+            email_body = self._build_email_body(result, from_email, reply_subject=reply_subject)
+
+            # ---------------------------------------------------------------------
+            # 4. Deliver via SMTP
+            # ---------------------------------------------------------------------
+            if self.email_service.is_configured():
+                self.email_service.send_email(
+                    to_email=from_email,
+                    subject=reply_subject,
+                    message=email_body,
+                    attachments=attachments,
+                    in_reply_to=message_id if message_id else None,
+                    references=references if references else None
+                )
+                logger.info(f"✅ Response email successfully dispatched to {from_email} (In-Reply-To: {message_id})")
+            else:
+                logger.info(f"ℹ️ Email credentials not configured in .env. Outputting response locally:\n{email_body}")
+        except Exception as e:
+            logger.exception(f"❌ Unhandled error processing query from {from_email}: {e}")
+
+
+    def _create_suggestions_card(self, suggestions: List[str], reply_subject: str = "Re: stocks") -> str:
+        """
+        Renders a clean, 100% mobile-responsive suggestions card.
+        Uses full-width vertical stacked blocks with word-break to completely eliminate horizontal mobile overflow.
+        """
+        items_html = ""
+        for s in suggestions:
+            items_html += f"""
+            <div style="margin: 6px 0; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px 14px; font-size: 13px; color: #0f172a; font-weight: 500; display: block; width: 100%; box-sizing: border-box; word-break: break-word;">
+                💬 &ldquo;{s}&rdquo;
+            </div>
+            """
 
         return f"""
-        <a href="{mailto_url}" target="_blank" style="
-            display: inline-block;
-            background-color: {bg_color};
-            color: {text_color};
-            padding: 9px 15px;
-            margin: 4px;
-            border-radius: 6px;
-            font-size: 13px;
-            font-weight: 600;
-            text-decoration: none;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.08);
-        ">{label}</a>
+        <div style="margin-top: 18px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; box-sizing: border-box; width: 100%; max-width: 100%;">
+            <div style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                💡 Suggested Follow-up Questions & Choices:
+            </div>
+            <div style="display: block; width: 100%; box-sizing: border-box;">
+                {items_html}
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #475569; border-top: 1px dashed #e2e8f0; padding-top: 8px; line-height: 1.4; word-break: break-word;">
+                ↩️ <em>To continue in this same thread, simply click <strong>Reply</strong> in your email app and send any question above!</em>
+            </div>
+        </div>
         """
 
-    def _build_email_body(self, result: dict, user_email: str) -> str:
-        """Constructs an aesthetic, interactive HTML email with action buttons."""
+    def _build_email_body(self, result: dict, user_email: str, reply_subject: str = "Re: stocks") -> str:
+        """Constructs an aesthetic, interactive HTML email with contextual suggestions."""
         intent = result.get("intent", "CHAT")
         transparency_note = result.get("transparency_note")
         ticker = result.get("ticker", "AAPL")
@@ -163,7 +228,7 @@ class StockEmailBot:
             """
 
         content_html = ""
-        action_buttons_html = ""
+        suggestions_html = ""
 
         # =====================================================================
         # INTENT: QUOTE (Real-time financial asset card)
@@ -171,10 +236,25 @@ class StockEmailBot:
         if intent == "QUOTE":
             quote = result.get("data", {})
             if not quote.get("success"):
-                content_html = f"<p style='color: #ef4444;'>❌ Unable to find stock data: {quote.get('error', 'Unknown error')}</p>"
+                err = quote.get("error", "Company or market data not found.")
+                content_html = f"""
+                <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin-bottom: 12px;">
+                    <div style="font-weight: 700; color: #b91c1c; font-size: 15px; margin-bottom: 6px;">
+                        ❌ Unable to Retrieve Stock Data for '{ticker}'
+                    </div>
+                    <div style="font-size: 13px; color: #7f1d1d; line-height: 1.5;">
+                        {err} This company may not exist in our database of ~8,000+ companies, could be unlisted, or market data is currently unavailable.
+                    </div>
+                </div>
+                """
+                suggestions_html = self._create_suggestions_card([
+                    "What is Apple price?",
+                    "Show Tesla 6 month chart",
+                    "What is Microsoft price?"
+                ], reply_subject=reply_subject)
             else:
                 is_up = (quote.get("change") or 0) >= 0
-                badge_color = "#10b981" if is_up else "#ef4444"
+                dot = "🟢" if is_up else "🔴"
                 sign = "+" if is_up else ""
                 curr_price = quote.get("current_price", 0.0)
                 change = quote.get("change", 0.0)
@@ -182,98 +262,138 @@ class StockEmailBot:
                 name = quote.get("company_name", ticker)
 
                 content_html = f"""
-                <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.03);">
-                    <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px;">
-                        <div>
-                            <h2 style="margin: 0; font-size: 20px; color: #0f172a;">{name} ({ticker})</h2>
-                            <div style="font-size: 26px; font-weight: 700; color: #0f172a; margin-top: 4px;">
-                                ${curr_price:,.2f} <span style="font-size: 13px; color: #64748b; font-weight: 400;">{quote.get('currency', 'USD')}</span>
-                            </div>
-                        </div>
-                        <div style="background: {badge_color}; color: white; padding: 6px 12px; border-radius: 20px; font-weight: 600; font-size: 13px;">
-                            {sign}{change:.2f} ({sign}{pct_change:.2f}%)
-                        </div>
+                <p style="margin: 0 0 12px 0; font-size: 14px; color: #334155; line-height: 1.5;">
+                    Here's the current market summary for <strong>{name} ({ticker})</strong> 📊
+                </p>
+                <div style="margin: 12px 0;">
+                    <div style="font-size: 13px; font-weight: 700; color: #475569; margin-bottom: 6px;">
+                        📊 Quick Stats:
                     </div>
-                    <table style="width: 100%; border-collapse: collapse; font-size: 13px; color: #475569; margin-top: 12px;">
+                    <div style="font-size: 14px; font-weight: 600; color: #0f172a; margin-bottom: 8px;">
+                        {dot} {ticker}: ${curr_price:,.2f} ({sign}{pct_change:.2f}%)
+                    </div>
+                    <table style="width: 100%; border-collapse: collapse; font-size: 13px; color: #475569;">
                         <tr style="border-top: 1px solid #f1f5f9;">
-                            <td style="padding: 6px 0;"><strong>Day Range:</strong></td>
+                            <td style="padding: 5px 0;"><strong>Day Range:</strong></td>
                             <td style="text-align: right;">${quote.get('day_low', '-')} - ${quote.get('day_high', '-')}</td>
                         </tr>
                         <tr style="border-top: 1px solid #f1f5f9;">
-                            <td style="padding: 6px 0;"><strong>52-Week Range:</strong></td>
+                            <td style="padding: 5px 0;"><strong>52-Week Range:</strong></td>
                             <td style="text-align: right;">${quote.get('fifty_two_week_low', '-')} - ${quote.get('fifty_two_week_high', '-')}</td>
                         </tr>
                         <tr style="border-top: 1px solid #f1f5f9;">
-                            <td style="padding: 6px 0;"><strong>P/E Ratio:</strong></td>
+                            <td style="padding: 5px 0;"><strong>P/E Ratio:</strong></td>
                             <td style="text-align: right;">{quote.get('pe_ratio', 'N/A')}</td>
                         </tr>
                     </table>
                 </div>
                 """
 
-                # Interactive Action Buttons
-                btn_chart = self._create_mailto_button("📈 Get 1M Chart", f"{ticker} Chart Request", f"Show me the chart for {ticker}", bg_color="#2563eb")
-                btn_csv = self._create_mailto_button("💾 Download CSV", f"{ticker} CSV Export", f"Send me CSV data for {ticker}", bg_color="#0f172a")
-                btn_compare_spy = self._create_mailto_button("📊 Compare vs SPY", f"Compare {ticker} vs SPY", f"Compare {ticker} and SPY", bg_color="#475569")
-                btn_compare_tsla = self._create_mailto_button("⚡ Compare vs Tesla", f"Compare {ticker} vs TSLA", f"Compare {ticker} and TSLA", bg_color="#475569")
-
-                action_buttons_html = f"""
-                <div style="margin-top: 20px;">
-                    <div style="font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 8px;">
-                        ⚡ Quick Interactive Actions (Tap to Reply):
-                    </div>
-                    <div style="display: flex; flex-wrap: wrap; margin: -4px;">
-                        {btn_chart}
-                        {btn_csv}
-                        {btn_compare_spy}
-                        {btn_compare_tsla}
-                    </div>
-                </div>
-                """
+                suggestions_html = self._create_suggestions_card([
+                    f"Show 6 month chart for {ticker}",
+                    f"Show 1 year chart for {ticker}",
+                    f"Send me CSV data for {ticker}",
+                    f"Compare {ticker} and SPY"
+                ], reply_subject=reply_subject)
 
         # =====================================================================
         # INTENT: CHART (Visual Trend Plot)
         # =====================================================================
         elif intent == "CHART":
-            period = result.get("period", "1mo").upper()
-            content_html = f"""
-            <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px;">
-                <h2 style="margin: 0 0 6px 0; font-size: 20px; color: #0f172a;">{ticker} • {period} Technical Chart</h2>
-                <p style="margin: 0 0 14px 0; color: #64748b; font-size: 13px;">Your requested price & volume trend plot is attached below as a high-resolution PNG.</p>
-            </div>
-            """
+            period = result.get("period", "1mo").lower()
+            quote = result.get("quote", {})
+            chart_data_uri = result.get("chart_base64")
 
-            btn_csv = self._create_mailto_button("💾 Download Raw CSV", f"{ticker} CSV Export", f"Send me CSV data for {ticker}", bg_color="#0f172a")
-            btn_1y_chart = self._create_mailto_button("📅 1-Year Trend", f"{ticker} 1Y Chart", f"Show me the 1y chart for {ticker}", bg_color="#2563eb")
-            btn_quote = self._create_mailto_button("💰 Refresh Price", f"{ticker} Quote", f"What is {ticker} price today?", bg_color="#10b981")
-
-            action_buttons_html = f"""
-            <div style="margin-top: 20px;">
-                <div style="font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 8px;">
-                    ⚡ Next Steps:
+            if not chart_data_uri and not quote.get("success"):
+                content_html = f"""
+                <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin-bottom: 12px;">
+                    <div style="font-weight: 700; color: #b91c1c; font-size: 15px; margin-bottom: 6px;">
+                        ❌ Unable to Generate Chart for '{ticker}'
+                    </div>
+                    <div style="font-size: 13px; color: #7f1d1d; line-height: 1.5;">
+                        Market history is unavailable for ticker '{ticker}'. This company may not exist in our database of ~8,000+ companies, or the exchange is temporarily unreachable.
+                    </div>
                 </div>
-                <div>{btn_csv} {btn_1y_chart} {btn_quote}</div>
-            </div>
-            """
+                """
+                suggestions_html = self._create_suggestions_card([
+                    "Show Apple 6 month chart",
+                    "Show Tesla 1 year chart",
+                    "What is Microsoft price?"
+                ], reply_subject=reply_subject)
+            else:
+                curr_price = quote.get("current_price")
+                pct_change = quote.get("pct_change", 0.0)
+                is_up = pct_change >= 0
+                dot = "🟢" if is_up else "🔴"
+                sign = "+" if is_up else ""
+
+                price_stat = f"<div style='font-size: 14px; font-weight: 600; color: #0f172a; margin-top: 6px;'>{dot} {ticker}: ${curr_price:,.2f} ({sign}{pct_change:.2f}%)</div>" if curr_price else ""
+
+                content_html = f"""
+                <p style="margin: 0 0 8px 0; font-size: 14px; color: #334155; line-height: 1.5;">
+                    Here's the performance chart for <strong>{ticker}</strong> ({period.upper()}) 📊
+                </p>
+                <p style="margin: 0 0 12px 0; color: #0284c7; font-size: 13px; font-weight: 600;">
+                    📊 Performance chart attached ({period})
+                </p>
+                <div style="margin: 12px 0;">
+                    <div style="font-size: 13px; font-weight: 700; color: #475569; margin-bottom: 4px;">
+                        📊 Quick Stats:
+                    </div>
+                    {price_stat}
+                </div>
+                """
+
+                chart_sugg = [
+                    f"Show 1 year chart for {ticker}",
+                    f"Compare {ticker} and AAPL ({period})",
+                    f"Compare {ticker} and GOOGL ({period})",
+                    f"Download {period.upper()} CSV spreadsheet for {ticker}",
+                ]
+                if period != "6mo":
+                    chart_sugg.insert(0, f"Show 6 month chart for {ticker}")
+                suggestions_html = self._create_suggestions_card(chart_sugg, reply_subject=reply_subject)
 
         # =====================================================================
         # INTENT: CSV (Tabular Historical Export)
         # =====================================================================
         elif intent == "CSV":
-            period = result.get("period", "1mo").upper()
+            period = result.get("period", "1mo").lower()
             rows_count = len(result.get("rows", []))
-            content_html = f"""
-            <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px;">
-                <h2 style="margin: 0 0 6px 0; font-size: 20px; color: #0f172a;">{ticker} • Historical Data Export ({period})</h2>
-                <p style="margin: 0; color: #475569; font-size: 13px;">
-                    Compiled <strong>{rows_count} trading sessions</strong> into an attached CSV spreadsheet (includes Date, Open, High, Low, Close, Volume).
+            if rows_count == 0:
+                content_html = f"""
+                <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin-bottom: 12px;">
+                    <div style="font-weight: 700; color: #b91c1c; font-size: 15px; margin-bottom: 6px;">
+                        ❌ Unable to Compile CSV for '{ticker}'
+                    </div>
+                    <div style="font-size: 13px; color: #7f1d1d; line-height: 1.5;">
+                        No historical trading sessions were found for period '{period.upper()}'. Market data is currently unavailable for this ticker.
+                    </div>
+                </div>
+                """
+                suggestions_html = self._create_suggestions_card([
+                    "Download Apple CSV data",
+                    "Show Tesla 6 month chart",
+                    "What is Microsoft price?"
+                ], reply_subject=reply_subject)
+            else:
+                content_html = f"""
+                <p style="margin: 0 0 8px 0; font-size: 14px; color: #334155; line-height: 1.5;">
+                    Here's the historical CSV data export for <strong>{ticker}</strong> 📊
                 </p>
-            </div>
-            """
+                <p style="margin: 0 0 12px 0; color: #0284c7; font-size: 13px; font-weight: 600;">
+                    💾 Historical CSV spreadsheet attached ({period})
+                </p>
+                <p style="margin: 0; color: #475569; font-size: 13px;">
+                    Compiled <strong>{rows_count} trading sessions</strong> including Date, Open, High, Low, Close, and Volume.
+                </p>
+                """
 
-            btn_chart = self._create_mailto_button("📈 View Chart Instead", f"{ticker} Chart", f"Show me the chart for {ticker}", bg_color="#2563eb")
-            btn_quote = self._create_mailto_button("💰 Get Current Price", f"{ticker} Quote", f"What is {ticker} price today?", bg_color="#10b981")
-            action_buttons_html = f"<div style='margin-top: 20px;'>{btn_chart} {btn_quote}</div>"
+                suggestions_html = self._create_suggestions_card([
+                    f"Show 6 month chart for {ticker}",
+                    f"Send CSV data for 1 year",
+                    f"What is {ticker} current price?"
+                ], reply_subject=reply_subject)
 
         # =====================================================================
         # INTENT: COMPARE (Multi-stock comparative)
@@ -281,27 +401,106 @@ class StockEmailBot:
         elif intent == "COMPARE":
             comp = result.get("data", {})
             items = comp.get("data", [])
-            cards_html = ""
-            for item in items:
-                sign = "+" if (item.get("change") or 0) >= 0 else ""
-                color = "#10b981" if (item.get("change") or 0) >= 0 else "#ef4444"
-                cards_html += f"""
-                <div style="flex: 1; min-width: 160px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; margin: 4px;">
-                    <div style="font-weight: 700; font-size: 15px; color: #0f172a;">{item.get('ticker')}</div>
-                    <div style="font-size: 18px; font-weight: 700; margin: 4px 0;">${item.get('current_price', 0):,.2f}</div>
-                    <div style="color: {color}; font-size: 12px; font-weight: 600;">{sign}{item.get('pct_change', 0):.2f}%</div>
-                    <div style="font-size: 11px; color: #64748b; margin-top: 4px;">P/E: {item.get('pe_ratio', 'N/A')}</div>
+            tickers = result.get("tickers", [])
+            period = result.get("period", "1mo").lower()
+            names_str = " and ".join(tickers)
+
+            if not comp.get("success") or len(items) == 0:
+                content_html = f"""
+                <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin-bottom: 12px;">
+                    <div style="font-weight: 700; color: #b91c1c; font-size: 15px; margin-bottom: 6px;">
+                        ❌ Unable to Compare Stocks ({names_str})
+                    </div>
+                    <div style="font-size: 13px; color: #7f1d1d; line-height: 1.5;">
+                        Could not retrieve market comparison data for <strong>{names_str}</strong>. One or both companies may not exist in our database or might be inactive.
+                    </div>
+                </div>
+                """
+                suggestions_html = self._create_suggestions_card([
+                    "Compare Apple and Microsoft",
+                    "Compare NVDA and AMD",
+                    "Show Tesla 6 month chart"
+                ], reply_subject=reply_subject)
+            else:
+                stats_lines = ""
+                for item in items:
+                    sign = "+" if (item.get("change") or 0) >= 0 else ""
+                    dot = "🟢" if (item.get("change") or 0) >= 0 else "🔴"
+                    stats_lines += f"""
+                    <div style="font-size: 14px; font-weight: 600; color: #0f172a; margin-bottom: 6px;">
+                        {dot} {item.get('ticker')}: ${item.get('current_price', 0):,.2f} ({sign}{item.get('pct_change', 0):.2f}%)
+                    </div>
+                    """
+
+                content_html = f"""
+                <p style="margin: 0 0 8px 0; font-size: 14px; color: #334155; line-height: 1.5;">
+                    Here's the comparison for <strong>{names_str}</strong> 📊
+                </p>
+                <p style="margin: 0 0 12px 0; color: #0284c7; font-size: 13px; font-weight: 600;">
+                    📊 Performance comparison chart attached ({period})
+                </p>
+                <div style="margin: 12px 0;">
+                    <div style="font-size: 13px; font-weight: 700; color: #475569; margin-bottom: 6px;">
+                        📊 Quick Stats:
+                    </div>
+                    {stats_lines}
                 </div>
                 """
 
+                suggestions_html = self._create_suggestions_card([
+                    "Show CSV data for both",
+                    "Show 6 month comparison chart",
+                    f"Show {tickers[0]} chart" if len(tickers) >= 1 else "Show chart",
+                    f"Show {tickers[1]} chart" if len(tickers) >= 2 else "Show chart"
+                ], reply_subject=reply_subject)
+
+        # =====================================================================
+        # INTENT: COMPARATIVE_CSV (Merged historical tabular export)
+        # =====================================================================
+        elif intent == "COMPARATIVE_CSV":
+            tickers = result.get("tickers", [])
+            period = result.get("period", "1mo").lower()
+            names_str = " and ".join(tickers)
+
             content_html = f"""
-            <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px;">
-                <h2 style="margin: 0 0 12px 0; font-size: 20px; color: #0f172a;">Stock Comparison</h2>
-                <div style="display: flex; flex-wrap: wrap; margin: -4px;">
-                    {cards_html}
+            <p style="margin: 0 0 8px 0; font-size: 14px; color: #334155; line-height: 1.5;">
+                Here's the merged comparative CSV export for <strong>{names_str}</strong> 📊
+            </p>
+            <p style="margin: 0 0 12px 0; color: #0284c7; font-size: 13px; font-weight: 600;">
+                💾 Merged comparative CSV spreadsheet attached ({period})
+            </p>
+            <p style="margin: 0; color: #475569; font-size: 13px;">
+                Includes aligned daily Close, High, Low, Open, and Volume columns for both <strong>{names_str}</strong>.
+            </p>
+            """
+
+            suggestions_html = self._create_suggestions_card([
+                "Show 6 month comparison chart",
+                f"Show {tickers[0]} analysis" if len(tickers) >= 1 else "Show analysis",
+                f"Show {tickers[1]} analysis" if len(tickers) >= 2 else "Show analysis"
+            ], reply_subject=reply_subject)
+
+        # =====================================================================
+        # INTENT: NOT_FOUND (Company or stock not in 8000+ database)
+        # =====================================================================
+        elif intent == "NOT_FOUND":
+            msg = result.get("message", "Company was not found in our database.")
+            content_html = f"""
+            <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin-bottom: 12px;">
+                <div style="font-weight: 700; color: #b91c1c; font-size: 15px; margin-bottom: 6px; display: flex; align-items: center;">
+                    <span style="margin-right: 6px;">🔍</span> Company Not Found in Database
+                </div>
+                <div style="font-size: 13px; color: #7f1d1d; line-height: 1.5;">
+                    {msg}
                 </div>
             </div>
             """
+
+            suggestions_html = self._create_suggestions_card([
+                "What is Apple price?",
+                "Show Tesla 6 month chart",
+                "What is Microsoft price?"
+            ], reply_subject=reply_subject)
 
         # =====================================================================
         # INTENT: CHAT / HELP
@@ -309,34 +508,119 @@ class StockEmailBot:
         else:
             msg = result.get("message", "Hello! How can I assist you with financial assets today?")
             content_html = f"""
-            <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; line-height: 1.6; color: #334155;">
-                <p style="margin-top: 0;">{msg}</p>
-            </div>
+            <p style="margin: 0 0 12px 0; font-size: 14px; color: #334155; line-height: 1.5;">
+                {msg}
+            </p>
             """
-            btn_apple = self._create_mailto_button("🍎 Check Apple Price", "Apple Quote", "What is Apple price today?", bg_color="#0f172a")
-            btn_tesla = self._create_mailto_button("⚡ Check Tesla Price", "Tesla Quote", "What is Tesla price today?", bg_color="#0f172a")
-            btn_nvda = self._create_mailto_button("🎮 Check Nvidia Price", "Nvidia Quote", "What is Nvidia price today?", bg_color="#0f172a")
-            action_buttons_html = f"<div style='margin-top: 16px;'>{btn_apple} {btn_tesla} {btn_nvda}</div>"
 
-        # Assemble Master Email Layout
+            suggestions_html = self._create_suggestions_card([
+                "What is Apple price and 6 month chart?",
+                "Compare NVDA and AMD",
+                "Show Tesla 1 year chart"
+            ], reply_subject=reply_subject)
+
+        # Assemble Master Email Layout (Mobile-Responsive, Overflow-Proof)
         return f"""<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <style type="text/css">
+        *, *:before, *:after {{
+            box-sizing: border-box !important;
+        }}
+        html, body {{
+            margin: 0 !important;
+            padding: 0 !important;
+            width: 100% !important;
+            -webkit-text-size-adjust: 100% !important;
+            -ms-text-size-adjust: 100% !important;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f8fafc;
+            color: #1e293b;
+        }}
+        .email-outer {{
+            width: 100% !important;
+            padding: 12px 8px !important;
+            box-sizing: border-box !important;
+            background-color: #f8fafc;
+        }}
+        .email-container {{
+            width: 100% !important;
+            max-width: 580px !important;
+            margin: 0 auto !important;
+            background-color: #ffffff !important;
+            border: 1px solid #e2e8f0 !important;
+            border-radius: 8px !important;
+            overflow: hidden !important;
+            box-sizing: border-box !important;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
+        }}
+        .email-header {{
+            background-color: #f1f5f9 !important;
+            padding: 12px 18px !important;
+            border-bottom: 1px solid #e2e8f0 !important;
+            box-sizing: border-box !important;
+        }}
+        .email-body {{
+            padding: 16px 18px !important;
+            box-sizing: border-box !important;
+            width: 100% !important;
+        }}
+        img {{
+            max-width: 100% !important;
+            height: auto !important;
+            display: block !important;
+            border-radius: 6px !important;
+        }}
+        table {{
+            width: 100% !important;
+            max-width: 100% !important;
+            table-layout: fixed !important;
+            box-sizing: border-box !important;
+        }}
+        td, th {{
+            word-break: break-word !important;
+        }}
+        @media only screen and (max-width: 600px) {{
+            .email-outer {{
+                padding: 4px !important;
+            }}
+            .email-container {{
+                width: 100% !important;
+                border-radius: 6px !important;
+            }}
+            .email-header {{
+                padding: 10px 14px !important;
+            }}
+            .email-body {{
+                padding: 12px 14px !important;
+            }}
+            h2 {{
+                font-size: 15px !important;
+            }}
+        }}
+    </style>
 </head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 24px; color: #0f172a;">
-    <div style="max-width: 600px; margin: 0 auto;">
-        <div style="margin-bottom: 14px;">
-            <span style="font-size: 20px;">📈</span>
-            <span style="font-size: 15px; font-weight: 700; color: #0f172a; margin-left: 4px;">Edge-AI Stock Assistant</span>
-        </div>
-        {note_html}
-        {content_html}
-        {action_buttons_html}
-        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0 16px 0;" />
-        <div style="text-align: center; font-size: 11px; color: #94a3b8;">
-            Powered by Needle 3 & Yahoo Finance • 100% Free Edge Execution
+<body>
+    <div class="email-outer">
+        <div class="email-container">
+            <div class="email-header">
+                <h2 style="margin: 0; font-size: 16px; color: #0284c7; font-weight: 700; display: flex; align-items: center;">
+                    <span style="margin-right: 8px;">📊</span> Finance Bot Response
+                </h2>
+            </div>
+            <div class="email-body">
+                {note_html}
+                {content_html}
+                {suggestions_html}
+                <div style="margin-top: 18px; border-top: 1px solid #e2e8f0; padding-top: 10px; font-size: 11px; color: #94a3b8; word-break: break-word;">
+                    Powered by Needle 3 & Yahoo Finance • 100% Free Edge Execution
+                </div>
+            </div>
         </div>
     </div>
 </body>

@@ -1,0 +1,32 @@
+# Virtual environments (must NEVER be copied into Docker image)
+stocks/
+venv/
+.venv/
+env/
+
+# Environment variables & secrets (NEVER commit or bake into images)
+.env
+.env.*
+*firebase*.json
+*serviceAccount*.json
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+
+# Git and OS metadata
+.git/
+.gitignore
+.DS_Store
+Thumbs.db
+
+# Logs and scratch tests
+*.log
+scratch/
+temp/
+tmp/

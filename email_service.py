@@ -16,6 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+from email.utils import formataddr, parseaddr
 import logging
 from typing import List, Dict, Any, Optional, Callable
 from dotenv import load_dotenv
@@ -98,10 +99,12 @@ class EmailBotService:
         to_email: str,
         subject: str,
         message: str,
-        attachments: Optional[List[Dict[str, Any]]] = None
+        attachments: Optional[List[Dict[str, Any]]] = None,
+        in_reply_to: Optional[str] = None,
+        references: Optional[str] = None
     ) -> bool:
         """
-        Sends an email response via SMTP with optional image / CSV attachments.
+        Sends an email response via SMTP with optional image / CSV attachments and threading headers.
         """
         if not self.is_configured():
             logger.warning("EMAIL_ADDRESS or EMAIL_PASSWORD not configured. Skipping SMTP send.")
@@ -109,9 +112,38 @@ class EmailBotService:
 
         try:
             msg = MIMEMultipart("mixed")
-            msg["From"] = f"Stock Assistant 📈 <{self.email_address}>"
+            # Use direct email address for From so Gmail displays stonks.gro@gmail.com directly
+            msg["From"] = self.email_address
+            msg["Reply-To"] = self.email_address
             msg["To"] = to_email
             msg["Subject"] = subject
+
+            # Set unique Message-ID for the outgoing email (RFC 2822)
+            domain = self.email_address.split("@")[-1] if "@" in self.email_address else "gmail.com"
+            msg["Message-ID"] = email.utils.make_msgid(domain=domain)
+
+            # Threading headers for grouping in the same email conversation/thread in Gmail/Outlook
+            clean_subj = subject.strip() if subject else ""
+            base_subj = re.sub(r"^(?:re:\s*|fwd:\s*)+", "", clean_subj, flags=re.IGNORECASE).strip()
+            if base_subj:
+                msg["Thread-Topic"] = base_subj
+
+            if in_reply_to:
+                clean_reply_to = in_reply_to.strip()
+                if not clean_reply_to.startswith("<"):
+                    clean_reply_to = "<" + clean_reply_to
+                if not clean_reply_to.endswith(">"):
+                    clean_reply_to = clean_reply_to + ">"
+                msg["In-Reply-To"] = clean_reply_to
+
+                if references:
+                    clean_refs = references.strip()
+                    if clean_reply_to not in clean_refs:
+                        msg["References"] = f"{clean_refs} {clean_reply_to}".strip()
+                    else:
+                        msg["References"] = clean_refs
+                else:
+                    msg["References"] = clean_reply_to
 
             # Determine whether message is HTML or plain text
             is_html = "<html" in message.lower() or "<div" in message.lower() or "<b" in message.lower() or "<br" in message.lower()
@@ -139,14 +171,21 @@ class EmailBotService:
 
                     if att_type == "image":
                         part = MIMEBase("image", "png")
+                        part.set_payload(data_bytes)
+                        encoders.encode_base64(part)
+                        part.add_header("Content-Disposition", "attachment", filename=filename)
+                        part.add_header("Content-ID", f"<{filename}>")
                     elif att_type == "csv":
                         part = MIMEBase("text", "csv")
+                        part.set_payload(data_bytes)
+                        encoders.encode_base64(part)
+                        part.add_header("Content-Disposition", "attachment", filename=filename)
                     else:
                         part = MIMEBase("application", "octet-stream")
+                        part.set_payload(data_bytes)
+                        encoders.encode_base64(part)
+                        part.add_header("Content-Disposition", "attachment", filename=filename)
 
-                    part.set_payload(data_bytes)
-                    encoders.encode_base64(part)
-                    part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
                     msg.attach(part)
 
             # Connect and send via SMTP with timeout and SSL fallback
@@ -296,15 +335,32 @@ class EmailBotService:
                         cleaned_body = clean_email_text(raw_content)
                         cleaned_subject = clean_email_text(subject)
 
-                        full_query = f"{cleaned_subject} {cleaned_body}".strip()
+                        # Prefer cleaned body; fallback to subject if body is empty
+                        full_query = cleaned_body.strip() if cleaned_body.strip() else cleaned_subject.strip()
 
                         # Skip completely empty messages
                         if not full_query:
                             logger.info(f"Skipping empty email from {from_email}.")
                             continue
 
-                        logger.info(f"📧 Processing cleaned email from {from_email}: '{full_query}'")
-                        handler_callback(from_email, full_query)
+                        # Extract Message-ID and References for conversation threading
+                        message_id = msg.get("Message-ID", "").strip()
+                        msg_references = msg.get("References", "").strip()
+
+                        logger.info(f"📧 Processing cleaned email from {from_email}: '{full_query}' (Message-ID: {message_id})")
+                        try:
+                            handler_callback(
+                                from_email=from_email,
+                                user_message=full_query,
+                                subject=subject,
+                                message_id=message_id,
+                                references=msg_references
+                            )
+                        except TypeError:
+                            # Fallback for callbacks expecting (from_email, user_message)
+                            handler_callback(from_email, full_query)
+                        except Exception as handler_err:
+                            logger.exception(f"Error handling email from {from_email}: {handler_err}")
 
             mail.close()
             mail.logout()

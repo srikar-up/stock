@@ -79,7 +79,7 @@ flowchart TD
         PandasCSV --> MailComposer
         Comp --> MailComposer
         Fallback --> MailComposer
-        MailComposer --> Buttons["Pre-filled 'mailto:' Action Buttons"]
+        MailComposer --> Buttons["Thread-Safe Contextual Suggestions"]
         Buttons --> StateSave["Firestore Pointer Update (merge=True)"]
         Buttons --> SMTP["SMTP Dispatcher (Gmail Port 587)"]
         SMTP --> Delivery["User's Email Inbox"]
@@ -112,8 +112,16 @@ Because on-device edge models prioritize tool syntax over vast text vocabularies
 
 ### 3. Downstream Financial Engine & Visuals (`market.py`)
 * **Real-Time Data:** Direct integration with `yfinance` to pull live prices, previous closes, daily high/lows, and market capitalization.
-* **Dark-Mode Technical Visuals:** Built on headless `matplotlib` (`Agg` backend). Draws modern slate-themed (`#0f172a`) charts with volume subplots, glowing price markers, grid lines, and adaptive emerald green / coral red fills based on net performance.
-* **Tabular CSV Generator:** Uses `pandas` to compile date, open, high, low, close, and volume records into downloadable `.csv` attachments.
+* **Professional Single Stock Analysis Chart:** Built on headless `matplotlib` (`Agg` backend). High-resolution (150 DPI) 2-panel chart featuring:
+  * Solid emerald green `Close Price` line with translucent green area fill down to 0 baseline.
+  * Orange dashed **20-day Moving Average** and purple dashed **50-day Moving Average** (with historical backfill so MAs are smooth from day 1).
+  * Horizontal dotted reference line at current price.
+  * Color-coded daily volume bars (green for up days, red for down days) formatted in Millions (`M`) and Thousands (`K`).
+  * Subtitle statistics: `Current: $X | Change: +Y% | High: $Z | Low: $W`.
+* **2-Stock Comparative Performance Chart:** 3-panel comparative layout featuring:
+  * Top full-width panel: Normalized `% Change from Start` with 0% dashed baseline, dual stock curves, and shaded +/- area fills above/below 0. Custom legend: `{TICKER1} 📈 (+X.XX%)` vs `{TICKER2} 📉 (-Y.YY%)`.
+  * Bottom side-by-side subplots: Mini price curves and color-coded daily volume bars for each ticker.
+* **Merged Multi-Stock CSV Exporter:** Aligns both stocks by `Date` (sorted ascending) with formatted column headers: `{TICKER}_Close_{TICKER}, {TICKER}_High_{TICKER}, {TICKER}_Low_{TICKER}, {TICKER}_Open_{TICKER}, {TICKER}_Volume_{TICKER}`.
 
 ---
 
@@ -142,21 +150,19 @@ Hugging Face Space containers sleep and restart periodically. Standard in-memory
 
 ---
 
-### 6. Interactive In-Email UI (Quick Action Buttons)
-Because email clients block JavaScript, our bot embeds **one-click pre-filled `mailto:` buttons** into the HTML cards:
+### 6. Interactive In-Email UI (Thread-Safe Follow-up Suggestions)
+To maintain 100% conversation continuity in the same Gmail/Outlook thread, our bot renders **contextual quick follow-up question cards**:
 
 ```html
-<!-- Interactive Quick-Action Example -->
-<a href="mailto:stonks.gro@gmail.com?subject=AAPL%20Chart&body=Show%20me%20the%20chart%20for%20AAPL"
-   style="background: #2563eb; color: #fff; padding: 9px 15px; border-radius: 6px; text-decoration: none; font-weight: 600;">
-   📈 Get 1M Chart
-</a>
+<!-- Thread-Safe Follow-Up Suggestion -->
+<div style="background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px 12px; font-size: 13px; font-weight: 500;">
+    💬 &ldquo;Show 6 month chart for AAPL&rdquo;
+</div>
 ```
 
-When an investor opens an email on mobile or desktop, they can simply tap:
-* **`[ 📈 Get 1M Chart ]`** $\rightarrow$ Instantly pre-fills a reply requesting the chart.
-* **`[ 💾 Download CSV ]`** $\rightarrow$ Pre-fills a reply requesting the raw spreadsheet.
-* **`[ 📊 Compare vs SPY ]`** $\rightarrow$ Pre-fills a reply comparing the stock to the S&P 500.
+* **Zero Thread Splitting:** Avoids disruptive `mailto:` URLs that force open separate compose drafts and break email thread continuity.
+* **Native Thread Continuity:** Instructs users to hit the native **Reply** button in their email client, automatically preserving `In-Reply-To`, `References`, and normalized `Re: Subject` headers.
+* **Contextual Suggestions:** Pre-computes intelligent follow-ups based on the user's latest query (e.g. 6-month chart, 1-year historical CSV, comparative stock analysis).
 
 ---
 
@@ -233,17 +239,29 @@ Watch your terminal log the incoming message and deliver the financial card back
 
 ## ☁️ Hugging Face Spaces Cloud Deployment
 
-This repository is pre-configured for deployment on **Hugging Face Spaces** (Free CPU Tier):
+This repository is **100% pre-configured for free 24/7 deployment** on **Hugging Face Spaces** (Free CPU / Docker Tier):
 
-1. Create a new Space on [Hugging Face](https://huggingface.co/spaces) and select **Docker** as the SDK.
-2. Push this repository to your Space.
-3. In your Space **Settings** $\rightarrow$ **Variables and Secrets**, add:
-   * `EMAIL_ADDRESS`
-   * `EMAIL_PASSWORD`
-   * `FIREBASE_CREDENTIALS_JSON` (Paste the raw JSON content of your service account key).
-4. The Space will automatically build the container via [`Dockerfile`](file:///e:/code/stock/Dockerfile) and expose:
-   * `GET /health` — Health check endpoint.
-   * `POST /webhook/email` — Secure webhook endpoint for incoming email relays (SendGrid, Mailgun, Postmark).
+1. **Create a Space**: Go to [Hugging Face Spaces](https://huggingface.co/spaces) $\rightarrow$ **Create new Space**.
+   * Space Name: `stock-email-bot`
+   * License: `MIT` / `Apache 2.0`
+   * Space SDK: **Docker** (Blank)
+   * Hardware: **CPU Basic (Free 2 vCPU · 16 GB RAM)**
+2. **Add Secrets & Environment Variables**:
+   In your Space **Settings** $\rightarrow$ **Variables and secrets**, add your credentials:
+   * **Secret**: `EMAIL_ADDRESS` $\rightarrow$ Your Gmail address (e.g. `stonks.gro@gmail.com`)
+   * **Secret**: `EMAIL_PASSWORD` $\rightarrow$ Your 16-character Google App Password
+   * **Secret** *(Optional)*: `FIREBASE_CREDENTIALS_JSON` $\rightarrow$ Paste service account key filename or JSON for persistent multi-turn memory
+   * **Variable** *(Optional)*: `EMAIL_CHECK_INTERVAL` $\rightarrow$ `10` (checks inbox every 10 seconds)
+3. **Push Repository**:
+   ```bash
+   git remote add space https://huggingface.co/spaces/YOUR_USERNAME/stock-email-bot
+   git push space main
+   ```
+4. **Autonomous Cloud Operation**:
+   Once built, Hugging Face Spaces automatically:
+   * Runs the **FastAPI Web Dashboard** on port 7860 with live interactive query testing.
+   * Runs the **Continuous IMAP Email Listener** in a background daemon thread listening to your Gmail inbox 24/7!
+   * **You can close your computer/terminal completely** — your bot will autonomously receive emails, generate high-res charts and CSVs, and reply in the same Gmail thread from the cloud!
 
 ---
 
