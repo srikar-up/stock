@@ -2,8 +2,10 @@
 Email Service Module (SMTP & IMAP)
 Allows the bot to connect directly to any email provider (Gmail, Outlook, Yahoo)
 to read incoming emails and send rich replies with charts and CSV attachments.
+Includes defensive cleaning to strip quoted replies, HTML tags, and email signatures.
 """
 import os
+import re
 import time
 import smtplib
 import imaplib
@@ -20,6 +22,42 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger("email_service")
+
+
+def clean_email_text(raw_text: str) -> str:
+    """
+    Cleans raw email content:
+    - Strips HTML tags
+    - Removes quoted reply blocks (e.g. 'On ... wrote:', lines with '>')
+    - Removes mobile signatures ('Sent from my...')
+    """
+    if not raw_text:
+        return ""
+
+    # Strip HTML tags
+    text = re.sub(r"<style[\s\S]*?</style>", " ", raw_text, flags=re.IGNORECASE)
+    text = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    lines = []
+    for line in text.splitlines():
+        line_clean = line.strip()
+        # Cut off quoted reply history
+        if line_clean.startswith(">"):
+            continue
+        if re.search(r"^on\s+.*wrote:$", line_clean, flags=re.IGNORECASE):
+            break
+        if re.search(r"^-+\s*original message\s*-+", line_clean, flags=re.IGNORECASE):
+            break
+        if line_clean.lower().startswith("from:") and "@" in line_clean:
+            break
+        if line_clean.lower().startswith("sent from my "):
+            continue
+
+        lines.append(line_clean)
+
+    cleaned = " ".join(lines)
+    return " ".join(cleaned.split())
 
 
 class EmailBotService:
@@ -48,12 +86,6 @@ class EmailBotService:
     ) -> bool:
         """
         Sends an email response via SMTP with optional image / CSV attachments.
-        
-        attachments format:
-        [
-            {'type': 'image', 'data': bytes, 'filename': 'aapl_chart.png'},
-            {'type': 'csv', 'data': str/bytes, 'filename': 'aapl_data.csv'}
-        ]
         """
         if not self.is_configured():
             logger.warning("EMAIL_ADDRESS or EMAIL_PASSWORD not configured. Skipping SMTP send.")
@@ -66,9 +98,8 @@ class EmailBotService:
             msg["Subject"] = subject
 
             # Determine whether message is HTML or plain text
-            is_html = "<html" in message.lower() or "<div" in message.lower() or "<b" in message.lower()
+            is_html = "<html" in message.lower() or "<div" in message.lower() or "<b" in message.lower() or "<br" in message.lower()
             if is_html:
-                # Attach HTML version
                 html_part = MIMEText(message, "html", "utf-8")
                 msg.attach(html_part)
             else:
@@ -85,7 +116,6 @@ class EmailBotService:
                     if not data:
                         continue
 
-                    # If string (like CSV), encode to bytes
                     if isinstance(data, str):
                         data_bytes = data.encode("utf-8")
                     else:
@@ -104,15 +134,16 @@ class EmailBotService:
                     msg.attach(part)
 
             # Connect and send via SMTP
+            logger.info(f"Connecting to SMTP {self.smtp_server}:{self.smtp_port} to send reply to {to_email}...")
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
                 server.login(self.email_address, self.email_password)
                 server.send_message(msg)
 
-            logger.info(f"Successfully sent email to {to_email}")
+            logger.info(f"✅ Successfully sent email reply to {to_email}")
             return True
         except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {e}")
+            logger.error(f"❌ Failed to send email to {to_email}: {e}")
             return False
 
     def poll_inbox_and_respond(self, handler_callback: Callable[[str, str], None]):
@@ -129,7 +160,6 @@ class EmailBotService:
             mail.login(self.email_address, self.email_password)
             mail.select("inbox")
 
-            # Search for unread emails
             status, messages = mail.search(None, "UNSEEN")
             if status != "OK" or not messages[0]:
                 mail.close()
@@ -150,32 +180,50 @@ class EmailBotService:
 
                         # Extract sender email
                         from_header = msg.get("From", "")
-                        # Parse sender email address
                         from_email = email.utils.parseaddr(from_header)[1]
+
+                        # Ignore self-sent emails (prevent infinite loop)
+                        if from_email.lower() == self.email_address.lower():
+                            logger.info("Skipping email sent from self.")
+                            continue
 
                         # Extract subject
                         subject, encoding = decode_header(msg.get("Subject", ""))[0]
                         if isinstance(subject, bytes):
                             subject = subject.decode(encoding or "utf-8", errors="ignore")
 
-                        # Extract body text
-                        body = ""
+                        # Extract body text (prefer text/plain, fallback to text/html)
+                        plain_body = ""
+                        html_body = ""
+
                         if msg.is_multipart():
                             for part in msg.walk():
-                                content_type = part.get_content_type()
-                                content_disposition = str(part.get("Content-Disposition"))
-                                if content_type == "text/plain" and "attachment" not in content_disposition:
-                                    charset = part.get_content_charset() or "utf-8"
-                                    body = part.get_payload(decode=True).decode(charset, errors="ignore")
-                                    break
+                                ctype = part.get_content_type()
+                                cdisp = str(part.get("Content-Disposition"))
+                                if "attachment" in cdisp:
+                                    continue
+                                charset = part.get_content_charset() or "utf-8"
+
+                                if ctype == "text/plain" and not plain_body:
+                                    plain_body = part.get_payload(decode=True).decode(charset, errors="ignore")
+                                elif ctype == "text/html" and not html_body:
+                                    html_body = part.get_payload(decode=True).decode(charset, errors="ignore")
                         else:
                             charset = msg.get_content_charset() or "utf-8"
-                            body = msg.get_payload(decode=True).decode(charset, errors="ignore")
+                            raw = msg.get_payload(decode=True).decode(charset, errors="ignore")
+                            if msg.get_content_type() == "text/html":
+                                html_body = raw
+                            else:
+                                plain_body = raw
 
-                        logger.info(f"Processing inbound email from {from_email}: '{subject}'")
+                        raw_content = plain_body if plain_body else html_body
+                        cleaned_body = clean_email_text(raw_content)
+                        cleaned_subject = clean_email_text(subject)
 
-                        # Pass to the bot handler
-                        handler_callback(from_email, f"{subject} {body}".strip())
+                        full_query = f"{cleaned_subject} {cleaned_body}".strip()
+
+                        logger.info(f"📧 Processing cleaned email from {from_email}: '{full_query}'")
+                        handler_callback(from_email, full_query)
 
             mail.close()
             mail.logout()

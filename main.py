@@ -15,6 +15,10 @@ from pydantic import BaseModel, EmailStr
 from storage import FirestoreContextManager
 from agent import NeedleStockAgent
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Logging setup
 logging.basicConfig(
     level=logging.INFO,

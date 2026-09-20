@@ -1,6 +1,7 @@
 """
 Typo-Resilient Mapping & Fuzzy Pre-Processing Module
 Maps noisy, misspelled, or colloquial company names/tickers to valid ticker symbols.
+Protected against stopword collisions, email signatures, and HTML artifacts.
 """
 from typing import Optional, Tuple
 import re
@@ -12,110 +13,66 @@ except ImportError:
     RAPIDFUZZ_AVAILABLE = False
 
 
-# Local text lookup dictionary mapping company strings, synonyms, and colloquial terms to valid tickers
-TICKER_DICTIONARY = {
-    # Mega Tech
+# High-priority primary company names mapping (Always checked first!)
+PRIMARY_COMPANY_NAMES = {
     "apple": "AAPL",
-    "aapl": "AAPL",
     "iphone": "AAPL",
-    "mac": "AAPL",
+    "ipad": "AAPL",
+    "macbook": "AAPL",
     "microsoft": "MSFT",
-    "msft": "MSFT",
     "windows": "MSFT",
     "xbox": "MSFT",
     "google": "GOOGL",
-    "googl": "GOOGL",
-    "goog": "GOOGL",
     "alphabet": "GOOGL",
     "youtube": "GOOGL",
     "amazon": "AMZN",
-    "amzn": "AMZN",
     "aws": "AMZN",
     "tesla": "TSLA",
-    "tsla": "TSLA",
     "elon": "TSLA",
     "nvidia": "NVDA",
-    "nvda": "NVDA",
     "meta": "META",
     "facebook": "META",
-    "fb": "META",
     "instagram": "META",
     "netflix": "NFLX",
-    "nflx": "NFLX",
-    "broadcom": "AVGO",
-    "avgo": "AVGO",
     "amd": "AMD",
-    "advanced micro devices": "AMD",
     "intel": "INTC",
-    "intc": "INTC",
-    "qualcomm": "QCOM",
-    "qcom": "QCOM",
-    "oracle": "ORCL",
-    "orcl": "ORCL",
     "salesforce": "CRM",
-    "crm": "CRM",
-    "adobe": "ADBE",
-    "adbe": "ADBE",
-
-    # Finance & Payments
+    "coca cola": "KO",
+    "pepsi": "PEP",
+    "disney": "DIS",
+    "walmart": "WMT",
+    "costco": "COST",
     "jpmorgan": "JPM",
-    "jp morgan": "JPM",
     "chase": "JPM",
-    "jpm": "JPM",
     "visa": "V",
     "mastercard": "MA",
-    "berkshire": "BRK-B",
-    "berkshire hathaway": "BRK-B",
-    "buffett": "BRK-B",
-    "bank of america": "BAC",
-    "bofa": "BAC",
-    "bac": "BAC",
-    "wells fargo": "WFC",
-    "goldman sachs": "GS",
-    "morgan stanley": "MS",
-    "paypal": "PYPL",
-
-    # Consumer & Retail
-    "walmart": "WMT",
-    "wmt": "WMT",
-    "costco": "COST",
-    "cost": "COST",
-    "home depot": "HD",
-    "hd": "HD",
-    "nike": "NKE",
-    "nke": "NKE",
-    "coca cola": "KO",
-    "coke": "KO",
-    "ko": "KO",
-    "pepsi": "PEP",
-    "pepsico": "PEP",
-    "starbucks": "SBUX",
-    "sbux": "SBUX",
-    "mcdonalds": "MCD",
-    "mcdonald's": "MCD",
-    "disney": "DIS",
-    "dis": "DIS",
-
-    # Indices & ETFs
-    "sp500": "SPY",
-    "s&p 500": "SPY",
-    "spy": "SPY",
-    "nasdaq": "QQQ",
-    "qqq": "QQQ",
-    "dow": "DIA",
-    "dow jones": "DIA",
-    "dia": "DIA",
-    "russell 2000": "IWM",
-    "iwm": "IWM",
-
-    # Crypto Proxies
     "bitcoin": "BTC-USD",
-    "btc": "BTC-USD",
     "ethereum": "ETH-USD",
+    "sp500": "SPY",
+    "nasdaq": "QQQ",
+}
+
+# Full dictionary including tickers
+TICKER_DICTIONARY = {
+    **PRIMARY_COMPANY_NAMES,
+    "aapl": "AAPL",
+    "msft": "MSFT",
+    "googl": "GOOGL",
+    "goog": "GOOGL",
+    "amzn": "AMZN",
+    "tsla": "TSLA",
+    "nvda": "NVDA",
+    "crm": "CRM",
+    "nflx": "NFLX",
+    "intc": "INTC",
+    "spy": "SPY",
+    "qqq": "QQQ",
+    "dia": "DIA",
+    "iwm": "IWM",
+    "btc": "BTC-USD",
     "eth": "ETH-USD",
 }
 
-# Display names for clean transparency feedback
 TICKER_NAMES = {
     "AAPL": "Apple Inc.",
     "MSFT": "Microsoft Corp.",
@@ -125,6 +82,7 @@ TICKER_NAMES = {
     "NVDA": "NVIDIA Corp.",
     "META": "Meta Platforms Inc.",
     "NFLX": "Netflix Inc.",
+    "CRM": "Salesforce, Inc.",
     "AMD": "Advanced Micro Devices",
     "INTC": "Intel Corp.",
     "SPY": "SPDR S&P 500 ETF Trust",
@@ -140,17 +98,28 @@ TICKER_NAMES = {
     "ETH-USD": "Ethereum USD",
 }
 
+# Words that should NEVER be fuzzy-matched to tickers (prevents collision like com/from -> crm)
+STOPWORDS = {
+    "from", "com", "org", "net", "mail", "email", "gmail", "sent", "iphone",
+    "price", "stock", "stocks", "cost", "quote", "chart", "data", "send", "show",
+    "what", "is", "the", "for", "me", "to", "at", "in", "on", "a", "an", "and",
+    "or", "it", "its", "that", "this", "can", "you", "please", "check", "tell",
+    "hi", "hello", "hey", "thanks", "thank", "bye", "good", "morning", "re", "fwd"
+}
+
 
 class TickerMatcher:
     """
     High-speed fuzzy ticker resolution engine.
-    Applies direct dictionary lookup followed by RapidFuzz probabilistic matching with >= 55% confidence.
+    Applies exact company matching first, followed by safe typo fuzzy matching.
     """
 
-    def __init__(self, confidence_threshold: float = 55.0):
+    def __init__(self, confidence_threshold: float = 70.0):
+        # Set conservative threshold to 70% to prevent false positives
         self.threshold = confidence_threshold
+        self.primary_names = PRIMARY_COMPANY_NAMES
         self.dictionary = TICKER_DICTIONARY
-        self.keys = list(self.dictionary.keys())
+        self.keys = list(self.primary_names.keys())
 
     def clean_text(self, text: str) -> str:
         """Sanitizes text for token comparison."""
@@ -167,45 +136,43 @@ class TickerMatcher:
             return None, 0.0, None, False
 
         cleaned = self.clean_text(query)
-        words = cleaned.split()
+        words = [w for w in cleaned.split() if w]
 
-        # 1. Direct match on tokens or whole query
-        if cleaned in self.dictionary:
-            ticker = self.dictionary[cleaned]
-            return ticker, 100.0, TICKER_NAMES.get(ticker, ticker), False
-
+        # 1. PRIORITY CHECK: Exact word match for primary company names (e.g., "apple", "tesla")
         for word in words:
-            if word in self.dictionary:
+            if word in self.primary_names:
+                ticker = self.primary_names[word]
+                return ticker, 100.0, TICKER_NAMES.get(ticker, ticker), False
+
+        # 2. Check uppercase explicit tickers with dollar sign or stand-alone ($AAPL, TSLA)
+        explicit_tickers = re.findall(r"\$([A-Z]{1,5})\b", query)
+        if explicit_tickers:
+            t = explicit_tickers[0].upper()
+            return t, 100.0, TICKER_NAMES.get(t, t), False
+
+        # 3. Check exact word in full dictionary (excluding common English stopwords)
+        for word in words:
+            if word not in STOPWORDS and word in self.dictionary:
                 ticker = self.dictionary[word]
                 return ticker, 100.0, TICKER_NAMES.get(ticker, ticker), False
 
-        # 2. Check uppercase 2-5 letter raw tickers in original query (e.g., "$AAPL" or "TSLA")
-        raw_ticker_pattern = re.findall(r"\b\$?([A-Z]{1,5}(?:-[A-Z]{1,4})?)\b", query)
-        for cand in raw_ticker_pattern:
-            cand_clean = cand.strip("$").upper()
-            if cand_clean.lower() in self.dictionary:
-                ticker = self.dictionary[cand_clean.lower()]
-                return ticker, 100.0, TICKER_NAMES.get(ticker, ticker), False
-            # Allow direct uppercase ticker standard
-            if len(cand_clean) >= 2 and cand_clean.isalpha():
-                return cand_clean, 90.0, cand_clean, False
+        # 4. Check uppercase words (e.g., AAPL) that match known tickers
+        raw_words = query.split()
+        for rw in raw_words:
+            clean_rw = rw.strip("$.,!?:;\"'()[]{}").upper()
+            if clean_rw in TICKER_NAMES:
+                return clean_rw, 100.0, TICKER_NAMES[clean_rw], False
 
-        # 3. Probabilistic RapidFuzz best-guess evaluation
+        # 5. Typo-resilient fuzzy matching on meaningful candidate tokens (>= 70% threshold)
         if RAPIDFUZZ_AVAILABLE and self.keys:
-            # Check candidate n-grams / words against dictionary
             best_match = None
             best_score = 0.0
             best_key = None
 
-            candidates = [cleaned] + words
-            # Include 2-word combinations
-            if len(words) >= 2:
-                for i in range(len(words) - 1):
-                    candidates.append(f"{words[i]} {words[i+1]}")
+            # Only evaluate words that are NOT common English stopwords
+            candidate_tokens = [w for w in words if w not in STOPWORDS and len(w) >= 3]
 
-            for cand in candidates:
-                if len(cand) < 2:
-                    continue
+            for cand in candidate_tokens:
                 result = process.extractOne(
                     cand,
                     self.keys,
@@ -217,7 +184,7 @@ class TickerMatcher:
                     if score > best_score:
                         best_score = score
                         best_key = match_key
-                        best_match = self.dictionary[match_key]
+                        best_match = self.primary_names[match_key]
 
             if best_match and best_score >= self.threshold:
                 matched_name = TICKER_NAMES.get(best_match, best_key.capitalize())

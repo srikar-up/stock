@@ -9,6 +9,9 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ class FirestoreContextManager:
             logger.info("firebase-admin not installed. Using in-memory state persistence.")
             return
 
-        creds_env = os.environ.get("FIREBASE_CREDENTIALS_JSON")
+        creds_env = os.environ.get("FIREBASE_CREDENTIALS_JSON", "").strip()
         if not creds_env:
             logger.info("FIREBASE_CREDENTIALS_JSON not provided in environment. Using in-memory store.")
             return
@@ -46,8 +49,14 @@ class FirestoreContextManager:
         try:
             # Check if existing app is already initialized
             if not firebase_admin._apps:
+                # Check direct path or path relative to script directory
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                alt_path = os.path.join(script_dir, creds_env)
+
                 if os.path.isfile(creds_env):
                     cred = credentials.Certificate(creds_env)
+                elif os.path.isfile(alt_path):
+                    cred = credentials.Certificate(alt_path)
                 else:
                     creds_dict = json.loads(creds_env)
                     cred = credentials.Certificate(creds_dict)

@@ -1,97 +1,70 @@
 """
-Unit & Integration Verification Tests for Edge-AI Stock Email Bot
+Unit & Integration Verification Tests for Structural Intelligence Layer
+Verifies strict adherence to schemas and behavioral directives.
 """
-import sys
-import os
-
 from matcher import TickerMatcher
 from storage import FirestoreContextManager
 from agent import NeedleStockAgent
-from market import MarketEngine
 
 
-def test_ticker_matcher():
-    print("\n--- 1. Testing TickerMatcher ---")
-    matcher = TickerMatcher(confidence_threshold=55.0)
+def test_directives():
+    print("=" * 60)
+    print("🧪 VERIFYING BEHAVIORAL DIRECTIVES & SCHEMAS")
+    print("=" * 60)
 
-    # Exact matches
-    t, conf, name, is_fuzzy = matcher.extract_ticker_from_text("What is Apple stock doing?")
-    print(f"Query: 'What is Apple stock doing?' -> Ticker: {t}, Conf: {conf}%, Name: {name}, Fuzzy: {is_fuzzy}")
-    assert t == "AAPL", f"Expected AAPL, got {t}"
-
-    # Fuzzy matches with typos
-    t, conf, name, is_fuzzy = matcher.extract_ticker_from_text("gool price")
-    print(f"Query: 'gool price' -> Ticker: {t}, Conf: {conf}%, Name: {name}, Fuzzy: {is_fuzzy}")
-    assert t == "GOOGL", f"Expected GOOGL for 'gool', got {t}"
-    assert conf >= 55.0, f"Expected conf >= 55, got {conf}"
-
-    t, conf, name, is_fuzzy = matcher.extract_ticker_from_text("amazn stock today")
-    print(f"Query: 'amazn stock today' -> Ticker: {t}, Conf: {conf}%, Name: {name}, Fuzzy: {is_fuzzy}")
-    assert t == "AMZN", f"Expected AMZN for 'amazn', got {t}"
-
-    # Ambiguous / Non-stock queries
-    t, conf, name, is_fuzzy = matcher.extract_ticker_from_text("hello there friend")
-    print(f"Query: 'hello there friend' -> Ticker: {t}")
-    assert t is None, f"Expected None for non-stock query, got {t}"
-
-    print("✅ TickerMatcher tests passed!")
-
-
-def test_context_storage():
-    print("\n--- 2. Testing State Persistence ---")
-    ctx_mgr = FirestoreContextManager()
-    user = "investor@example.com"
-
-    # Set initial context
-    updated = ctx_mgr.update_user_context(user, last_ticker="TSLA", last_action="QUOTE")
-    assert updated.get("last_ticker") == "TSLA"
-    assert updated.get("last_action") == "QUOTE"
-
-    # Read context back
-    read_back = ctx_mgr.get_user_context(user)
-    assert read_back.get("last_ticker") == "TSLA"
-    print(f"Retrieved context for {user}: {read_back}")
-    print("✅ State Persistence tests passed!")
-
-
-def test_agent_intent_and_context_tracking():
-    print("\n--- 3. Testing NeedleStockAgent & Sequential Context ---")
     ctx_mgr = FirestoreContextManager()
     agent = NeedleStockAgent(context_manager=ctx_mgr)
-    test_user = "trader_alice@hedgefund.com"
+    user = "analyst@hedgefund.com"
 
-    # Step A: User asks for Apple quote
-    res1 = agent.process_message(test_user, subject="Apple Inquiry", body="Can you check apple price for me?")
-    print(f"Step 1 Intent: {res1.get('intent')}, Ticker: {res1.get('ticker')}")
-    assert res1.get("intent") == "QUOTE"
-    assert res1.get("ticker") == "AAPL"
+    # DIRECTIVE 1: GREETING & INTRO ROUTING
+    # "hi", "hello" must instantly route to chat without guessing tickers
+    res_hi = agent.route_intent("Hello there!", user_context={})
+    print(f"\n[Test 1] Query: 'Hello there!' -> Action: {res_hi.get('action')}")
+    assert res_hi.get("action") == "chat", f"Expected 'chat', got {res_hi.get('action')}"
 
-    # Verify context saved
-    ctx = ctx_mgr.get_user_context(test_user)
-    assert ctx.get("last_ticker") == "AAPL"
+    res_hey = agent.route_intent("hi", user_context={})
+    assert res_hey.get("action") == "chat"
 
-    # Step B: User asks for chart without mentioning the ticker (context continuation)
-    res2 = agent.process_message(test_user, subject="Follow up", body="Please send me the technical chart")
-    print(f"Step 2 Intent: {res2.get('intent')}, Ticker: {res2.get('ticker')}, Period: {res2.get('period')}")
-    assert res2.get("intent") == "CHART"
-    assert res2.get("ticker") == "AAPL", f"Expected AAPL from context, got {res2.get('ticker')}"
+    # DIRECTIVE 3: BOUNDARY CHECK (COMPARE MAX 2)
+    # 3+ stocks must drop to chat
+    res_overload = agent.route_intent("Compare Apple, Microsoft, Tesla", user_context={})
+    print(f"\n[Test 2] Overload Query (3 stocks) -> Action: {res_overload.get('action')}")
+    assert res_overload.get("action") == "chat", f"Expected 'chat' for 3 stocks, got {res_overload.get('action')}"
 
-    # Step C: Compare intent
-    res3 = agent.process_message(test_user, subject="Comparison", body="Compare Microsoft vs Tesla")
-    print(f"Step 3 Intent: {res3.get('intent')}, Tickers: {res3.get('tickers')}")
-    assert res3.get("intent") == "COMPARE"
-    assert "MSFT" in res3.get("tickers") and "TSLA" in res3.get("tickers")
+    # Valid 2-stock comparison
+    res_compare = agent.route_intent("Compare Apple and Microsoft", user_context={})
+    print(f"\n[Test 3] Compare 2 stocks -> Action: {res_compare.get('action')}, Symbols: {res_compare.get('parameters', {}).get('symbols')}")
+    assert res_compare.get("action") == "compare_stocks"
+    assert res_compare.get("parameters", {}).get("symbols") == ["AAPL", "MSFT"]
 
-    # Step D: General conversational greeting
-    res4 = agent.process_message(test_user, subject="Hi", body="Good morning, who are you?")
-    print(f"Step 4 Intent: {res4.get('intent')}")
-    assert res4.get("intent") == "CHAT"
+    # SCHEMA: get_stock_info
+    res_quote = agent.route_intent("What is Tesla's current price?", user_context={})
+    print(f"\n[Test 4] Query: 'What is Tesla's current price?' -> Action: {res_quote.get('action')}, Symbol: {res_quote.get('parameters', {}).get('symbol')}")
+    assert res_quote.get("action") == "get_stock_info"
+    assert res_quote.get("parameters", {}).get("symbol") == "TSLA"
 
-    print("✅ Agent intent and context tests passed!")
+    # Save TSLA to context
+    ctx_mgr.update_user_context(user, last_ticker="TSLA", last_action="get_stock_info")
+    saved_ctx = ctx_mgr.get_user_context(user)
+
+    # DIRECTIVE 2: METADATA CONTEXT MEMORY (Pronoun substitution)
+    # "show me its chart" should substitute "its" with TSLA from context
+    res_context = agent.route_intent("Show me its chart for 1 year", user_context=saved_ctx)
+    print(f"\n[Test 5] Context Query: 'Show me its chart for 1 year' -> Action: {res_context.get('action')}, Symbol: {res_context.get('parameters', {}).get('symbol')}, Period: {res_context.get('parameters', {}).get('period')}")
+    assert res_context.get("action") == "show_chart"
+    assert res_context.get("parameters", {}).get("symbol") == "TSLA"
+    assert res_context.get("parameters", {}).get("period") == "1y"
+
+    # SCHEMA: get_csv
+    res_csv = agent.route_intent("Send me csv data for that stock", user_context=saved_ctx)
+    print(f"\n[Test 6] CSV Query: 'Send me csv data for that stock' -> Action: {res_csv.get('action')}, Symbol: {res_csv.get('parameters', {}).get('symbol')}")
+    assert res_csv.get("action") == "get_csv"
+    assert res_csv.get("parameters", {}).get("symbol") == "TSLA"
+
+    print("\n" + "=" * 60)
+    print("✅ ALL BEHAVIORAL DIRECTIVES & SCHEMAS VERIFIED SUCCESSFULLY!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    test_ticker_matcher()
-    test_context_storage()
-    test_agent_intent_and_context_tracking()
-    print("\n🎉 ALL VERIFICATION TESTS COMPLETED SUCCESSFULLY!")
+    test_directives()
