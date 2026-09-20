@@ -133,15 +133,28 @@ class EmailBotService:
                     part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
                     msg.attach(part)
 
-            # Connect and send via SMTP
+            # Connect and send via SMTP with timeout and SSL fallback
             logger.info(f"Connecting to SMTP {self.smtp_server}:{self.smtp_port} to send reply to {to_email}...")
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.email_address, self.email_password)
-                server.send_message(msg)
+            sent = False
+            try:
+                # Primary attempt: configured port (default 587 STARTTLS) with 12s timeout
+                with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=12) as server:
+                    server.starttls()
+                    server.login(self.email_address, self.email_password)
+                    server.send_message(msg)
+                    sent = True
+            except Exception as smtp_err:
+                logger.warning(f"SMTP port {self.smtp_port} failed or timed out: {smtp_err}. Retrying via direct SSL (port 465)...")
+                # Fallback attempt: port 465 SSL (bypasses ISP port 587 packet drops / STARTTLS stalls)
+                with smtplib.SMTP_SSL(self.smtp_server, 465, timeout=15) as ssl_server:
+                    ssl_server.login(self.email_address, self.email_password)
+                    ssl_server.send_message(msg)
+                    sent = True
 
-            logger.info(f"✅ Successfully sent email reply to {to_email}")
-            return True
+            if sent:
+                logger.info(f"✅ Successfully sent email reply to {to_email}")
+                return True
+            return False
         except Exception as e:
             logger.error(f"❌ Failed to send email to {to_email}: {e}")
             return False
