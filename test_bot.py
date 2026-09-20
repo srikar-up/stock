@@ -66,5 +66,22 @@ def test_directives():
     print("=" * 60)
 
 
+def test_process_message_pipeline():
+    print("\n" + "=" * 60)
+    print("🧪 VERIFYING FULL PROCESS_MESSAGE PIPELINE (NEEDLE / FALLBACK)")
+    print("=" * 60)
+
+    ctx_mgr = FirestoreContextManager()
+    agent = NeedleStockAgent(context_manager=ctx_mgr)
+    user = "trader@fund.com"
+
+    res = agent.process_message(user, subject="Apple Inquiry", body="What is Apple price?")
+    print(f"Engine used: {res.get('engine')}, Intent: {res.get('intent')}, Ticker: {res.get('ticker')}")
+    assert res.get("intent") == "QUOTE"
+    assert res.get("ticker") == "AAPL"
+    print("✅ Full execution pipeline verified!")
+
+
 if __name__ == "__main__":
     test_directives()
+    test_process_message_pipeline()

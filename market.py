@@ -212,7 +212,7 @@ class MarketEngine:
         Retrieves side-by-side comparison data for multiple tickers.
         """
         results = []
-        for t in tickers[:4]: # Cap at 4 tickers
+        for t in tickers[:2]:  # Enforce strict MAX 2 tickers policy
             quote = cls.get_stock_quote(t)
             if quote.get("success"):
                 results.append(quote)
